@@ -1,4 +1,4 @@
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
 import { promises as fs } from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -11,9 +11,9 @@ type PiApi =
   | "anthropic-messages"
   | "google-generative-ai";
 
-type PiInput = "text" | "image";
+type InputType = "text" | "image";
 
-type PiCost = {
+type ModelCost = {
   input: number;
   output: number;
   cacheRead: number;
@@ -24,10 +24,10 @@ type DiscoveredModel = {
   id: string;
   name: string;
   reasoning: boolean;
-  input: PiInput[];
-  cost: PiCost;
+  input: InputType[];
   contextWindow: number;
   maxTokens: number;
+  cost: ModelCost;
 };
 
 type ModelsJson = {
@@ -38,9 +38,9 @@ type ModelsJson = {
 const DEFAULT_CONTEXT_WINDOW = 128_000;
 const DEFAULT_MAX_TOKENS = 16_384;
 
-/* -------------------------------------------------------------------------- */
-/* Generic helpers                                                           */
-/* -------------------------------------------------------------------------- */
+/* ============================================================================
+ * Generic helpers
+ * ========================================================================== */
 
 function isObject(value: unknown): value is JsonObject {
   return (
@@ -69,24 +69,21 @@ function firstNumber(
   ...values: unknown[]
 ): number | undefined {
   for (const value of values) {
-    let numberValue: number;
+    let n: number;
 
     if (typeof value === "number") {
-      numberValue = value;
+      n = value;
     } else if (
       typeof value === "string" &&
-      value.trim()
+      value.trim().length > 0
     ) {
-      numberValue = Number(value);
+      n = Number(value);
     } else {
       continue;
     }
 
-    if (
-      Number.isFinite(numberValue) &&
-      numberValue > 0
-    ) {
-      return numberValue;
+    if (Number.isFinite(n) && n > 0) {
+      return n;
     }
   }
 
@@ -132,22 +129,15 @@ function getNested(
   return undefined;
 }
 
-/* -------------------------------------------------------------------------- */
-/* URL / provider helpers                                                     */
-/* -------------------------------------------------------------------------- */
+/* ============================================================================
+ * URL /provider helpers
+ * ========================================================================== */
 
 function normalizeBaseUrl(
-  value: string,
+  input: string,
 ): string {
-  let url = value.trim().replace(/\/+$/, "");
+  let url = input.trim().replace(/\/+$/, "");
 
-  /*
-   * Let the user paste either:
-   *
-   * https://provider.example/v1
-   * https://provider.example/v1/models
-   * https://provider.example/models
-   */
   url = url.replace(
     /\/(?:v1\/)?models$/i,
     "",
@@ -200,6 +190,7 @@ function inferApi(
     url.includes(
       "generativelanguage.googleapis.com",
     ) ||
+    url.includes("googleapis.com") ||
     url.includes("gemini")
   ) {
     return "google-generative-ai";
@@ -212,86 +203,88 @@ function inferApi(
   return "openai-completions";
 }
 
-/* -------------------------------------------------------------------------- */
-/* Model metadata discovery                                                   */
-/* -------------------------------------------------------------------------- */
+/* ============================================================================
+ * Context-window discovery
+ * ========================================================================== */
 
 function getContextWindow(
   model: JsonObject,
 ): number {
-  /*
-   * Different providers use different names.
-   *
-   * We try all common variants before falling
-   * back to Pi's default.
-   */
   return (
     firstNumber(
-      // Common top-level names
       model.context_window,
       model.contextWindow,
+
       model.context_length,
       model.contextLength,
 
-      // More variants
       model.max_context_length,
       model.maxContextLength,
+
       model.input_token_limit,
       model.inputTokenLimit,
+
       model.max_input_tokens,
       model.maxInputTokens,
+
       model.context_size,
       model.contextSize,
 
-      // Nested limits
       getNested(
         model,
         ["limits", "context_window"],
       ),
+
       getNested(
         model,
         ["limits", "contextWindow"],
       ),
+
       getNested(
         model,
         ["limits", "context_length"],
       ),
+
       getNested(
         model,
         ["limits", "max_context_length"],
       ),
+
       getNested(
         model,
         ["limits", "context_size"],
       ),
 
-      // Nested capabilities
       getNested(
         model,
         ["capabilities", "context_window"],
       ),
+
       getNested(
         model,
         ["capabilities", "contextWindow"],
       ),
+
       getNested(
         model,
         ["capabilities", "context_length"],
       ),
+
       getNested(
         model,
         ["capabilities", "max_context_length"],
       ),
 
-      // Nested limits under metadata
       getNested(
         model,
         ["metadata", "context_window"],
       ),
+
       getNested(
         model,
         ["metadata", "contextWindow"],
       ),
+
       getNested(
         model,
         ["metadata", "context_length"],
@@ -300,62 +293,70 @@ function getContextWindow(
   );
 }
 
+/* ============================================================================
+ * Maximum output token discovery
+ * ========================================================================== */
+
 function getMaxTokens(
   model: JsonObject,
 ): number {
   return (
     firstNumber(
-      // Common names
       model.max_tokens,
       model.maxTokens,
+
       model.max_output_tokens,
       model.maxOutputTokens,
+
       model.max_completion_tokens,
       model.maxCompletionTokens,
 
-      // Other common names
       model.output_token_limit,
       model.outputTokenLimit,
+
       model.max_output_length,
       model.maxOutputLength,
 
-      // Nested limits
       getNested(
         model,
         ["limits", "max_tokens"],
       ),
+
       getNested(
         model,
         ["limits", "maxTokens"],
       ),
+
       getNested(
         model,
         ["limits", "max_output_tokens"],
       ),
+
       getNested(
         model,
         ["limits", "maxOutputTokens"],
       ),
+
       getNested(
         model,
         ["limits", "max_completion_tokens"],
       ),
 
-      // Nested capabilities
       getNested(
         model,
         ["capabilities", "max_tokens"],
       ),
+
       getNested(
         model,
         ["capabilities", "max_output_tokens"],
       ),
 
-      // Metadata
       getNested(
         model,
         ["metadata", "max_tokens"],
       ),
+
       getNested(
         model,
         ["metadata", "max_output_tokens"],
@@ -364,7 +365,11 @@ function getMaxTokens(
   );
 }
 
-function getReasoning(
+/* ============================================================================
+ * Reasoning discovery
+ * ========================================================================== */
+
+function detectReasoning(
   model: JsonObject,
 ): boolean {
   return (
@@ -372,6 +377,7 @@ function getReasoning(
       model.reasoning,
       model.supports_reasoning,
       model.supportsReasoning,
+
       model.reasoning_capable,
       model.reasoningCapable,
 
@@ -397,12 +403,16 @@ function getReasoning(
   );
 }
 
+/* ============================================================================
+ * Input-modality discovery
+ * ========================================================================== */
+
 function getInputTypes(
   model: JsonObject,
-): PiInput[] {
+): InputType[] {
   let imageSupport = false;
 
-  const modalityFields = [
+  const modalityValues = [
     model.input_modalities,
     model.inputModalities,
     model.modalities,
@@ -418,15 +428,13 @@ function getInputTypes(
     ),
   ];
 
-  for (const value of modalityFields) {
+  for (const value of modalityValues) {
     if (!Array.isArray(value)) {
       continue;
     }
 
     for (const item of value) {
-      if (
-        typeof item !== "string"
-      ) {
+      if (typeof item !== "string") {
         continue;
       }
 
@@ -469,13 +477,13 @@ function getInputTypes(
     : ["text"];
 }
 
-/* -------------------------------------------------------------------------- */
-/* Pricing discovery                                                          */
-/* -------------------------------------------------------------------------- */
+/* ============================================================================
+ * Pricing discovery
+ * ========================================================================== */
 
-function getPricing(
+function getCost(
   model: JsonObject,
-): PiCost {
+): ModelCost {
   const pricing =
     isObject(model.pricing)
       ? model.pricing
@@ -486,38 +494,17 @@ function getPricing(
       ? model.cost
       : undefined;
 
-  /*
-   * Prices in Pi are USD / million tokens.
-   *
-   * A provider may return:
-   *
-   *   0.003
-   *
-   * meaning USD/token.
-   *
-   * Or:
-   *
-   *   3
-   *
-   * meaning USD/million tokens.
-   *
-   * We handle both common styles.
-   */
-  const normalizePrice = (
+  function normalizePrice(
     value: unknown,
-  ): number => {
-    const numberValue =
-      firstNumber(value) ?? 0;
+  ): number {
+    const n = firstNumber(value) ?? 0;
 
-    if (
-      numberValue > 0 &&
-      numberValue < 0.01
-    ) {
-      return numberValue * 1_000_000;
+    if (n > 0 && n < 0.01) {
+      return n * 1_000_000;
     }
 
-    return numberValue;
-  };
+    return n;
+  }
 
   return {
     input: normalizePrice(
@@ -554,9 +541,9 @@ function getPricing(
   };
 }
 
-/* -------------------------------------------------------------------------- */
-/* Provider response parsing                                                  */
-/* -------------------------------------------------------------------------- */
+/* ============================================================================
+ * Provider response parsing
+ * ========================================================================== */
 
 function getModelArray(
   payload: unknown,
@@ -569,25 +556,15 @@ function getModelArray(
     return [];
   }
 
-  /*
-   * OpenAI:
-   *   { "data": [...] }
-   *
-   * Other gateways:
-   *   { "models": [...] }
-   *   { "items": [...] }
-   *   { "results": [...] }
-   */
   for (
-    const property of [
+    const key of [
       "data",
       "models",
       "items",
       "results",
     ]
   ) {
-    const value =
-      payload[property];
+    const value = payload[key];
 
     if (Array.isArray(value)) {
       return value;
@@ -603,17 +580,17 @@ function normalizeModels(
   const models: DiscoveredModel[] = [];
 
   for (
-    const item of getModelArray(payload)
+    const value of getModelArray(payload)
   ) {
-    if (!isObject(item)) {
+    if (!isObject(value)) {
       continue;
     }
 
     const id =
       firstString(
-        item.id,
-        item.model,
-        item.slug,
+        value.id,
+        value.model,
+        value.slug,
       );
 
     if (!id) {
@@ -622,10 +599,10 @@ function normalizeModels(
 
     const name =
       firstString(
-        item.name,
-        item.display_name,
-        item.displayName,
-        item.label,
+        value.name,
+        value.display_name,
+        value.displayName,
+        value.label,
       ) ?? id;
 
     models.push({
@@ -633,25 +610,22 @@ function normalizeModels(
       name,
 
       reasoning:
-        getReasoning(item),
+        detectReasoning(value),
 
       input:
-        getInputTypes(item),
-
-      cost:
-        getPricing(item),
+        getInputTypes(value),
 
       contextWindow:
-        getContextWindow(item),
+        getContextWindow(value),
 
       maxTokens:
-        getMaxTokens(item),
+        getMaxTokens(value),
+
+      cost:
+        getCost(value),
     });
   }
 
-  /*
-   * Remove duplicate IDs.
-   */
   return [
     ...new Map(
       models.map(
@@ -664,9 +638,9 @@ function normalizeModels(
   ];
 }
 
-/* -------------------------------------------------------------------------- */
-/* HTTP                                                                       */
-/* -------------------------------------------------------------------------- */
+/* ============================================================================
+ * HTTP
+ * ========================================================================== */
 
 async function fetchJson(
   url: string,
@@ -679,13 +653,6 @@ async function fetchJson(
     Accept: "application/json",
   };
 
-  /*
-   * Most OpenAI-compatible APIs
-   * use Authorization: Bearer.
-   *
-   * For some APIs that don't require
-   * authentication this is simply omitted.
-   */
   if (apiKey.trim()) {
     headers.Authorization =
       `Bearer ${apiKey.trim()}`;
@@ -697,29 +664,33 @@ async function fetchJson(
       headers,
     });
 
-  const text =
+  const body =
     await response.text();
 
   if (!response.ok) {
     throw new Error(
-      `HTTP ${response.status} ${response.statusText}\n` +
-      text.slice(0, 500),
+      [
+        `HTTP ${response.status} ${response.statusText}`,
+        body.slice(0, 500),
+      ].join("\n"),
     );
   }
 
   try {
-    return JSON.parse(text);
+    return JSON.parse(body);
   } catch {
     throw new Error(
-      `Provider returned invalid JSON:\n` +
-      text.slice(0, 500),
+      [
+        "Provider returned invalid JSON:",
+        body.slice(0, 500),
+      ].join("\n"),
     );
   }
 }
 
-/* -------------------------------------------------------------------------- */
-/* Model endpoint discovery                                                   */
-/* -------------------------------------------------------------------------- */
+/* ============================================================================
+ * Model discovery
+ * ========================================================================== */
 
 async function discoverModels(
   baseUrl: string,
@@ -728,7 +699,7 @@ async function discoverModels(
   endpoint: string;
   models: DiscoveredModel[];
 }> {
-  const candidates = [
+  const endpoints = [
     `${baseUrl}/models`,
     `${baseUrl}/v1/models`,
   ];
@@ -739,7 +710,7 @@ async function discoverModels(
 
   for (
     const endpoint of [
-      ...new Set(candidates),
+      ...new Set(endpoints),
     ]
   ) {
     try {
@@ -761,7 +732,7 @@ async function discoverModels(
 
       lastError =
         new Error(
-          "Endpoint returned no model entries.",
+          "The endpoint returned no usable models.",
         );
     } catch (error) {
       lastError = error;
@@ -770,11 +741,11 @@ async function discoverModels(
 
   throw new Error(
     [
-      "Could not discover models.",
+      "Could not discover provider models.",
       "",
-      "Tried:",
+      "Endpoints tried:",
       ...[
-        ...new Set(candidates),
+        ...new Set(endpoints),
       ].map(
         (url) => `  ${url}`,
       ),
@@ -787,28 +758,136 @@ async function discoverModels(
   );
 }
 
-/* -------------------------------------------------------------------------- */
-/* models.json                                                                */
-/* -------------------------------------------------------------------------- */
+/* ============================================================================
+ * Manual model construction
+ * ========================================================================== */
 
-function getModelsJsonPath(): string {
-  /*
-   * Windows:
-   *   C:\Users\User\.pi\agent\models.json
-   *
-   * Linux:
-   *   /home/user/.pi/agent/models.json
-   *
-   * macOS:
-   *   /Users/user/.pi/agent/models.json
-   */
+function createManualModel(
+  id: string,
+  supportsImage: boolean,
+): DiscoveredModel {
+  return {
+    id,
+    name: id,
+    reasoning: false,
+    input: supportsImage
+      ? ["text", "image"]
+      : ["text"],
+    contextWindow: DEFAULT_CONTEXT_WINDOW,
+    maxTokens: DEFAULT_MAX_TOKENS,
+    cost: {
+      input: 0,
+      output: 0,
+      cacheRead: 0,
+      cacheWrite: 0,
+    },
+  };
+}
+
+/* ============================================================================
+ * Model selection parsing
+ * ========================================================================== */
+
+function parseModelSelection(
+  input: string,
+  models: DiscoveredModel[],
+): DiscoveredModel[] {
+  const selected: DiscoveredModel[] = [];
+  const seen = new Set<string>();
+
+  const parts = input
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean);
+
+  for (const part of parts) {
+    if (part.toLowerCase() === "all") {
+      return models;
+    }
+
+    const rangeMatch =
+      part.match(/^(\d+)-(\d+)$/);
+
+    if (rangeMatch) {
+      const start = parseInt(
+        rangeMatch[1],
+        10,
+      );
+      const end = parseInt(
+        rangeMatch[2],
+        10,
+      );
+      const lo = Math.min(start, end);
+      const hi = Math.max(start, end);
+
+      for (let i = lo; i <= hi; i++) {
+        if (i >= 1 && i <= models.length) {
+          const model = models[i - 1];
+
+          if (!seen.has(model.id)) {
+            seen.add(model.id);
+            selected.push(model);
+          }
+        }
+      }
+
+      continue;
+    }
+
+    const num = Number(part);
+
+    if (
+      Number.isFinite(num) &&
+      num >= 1 &&
+      num <= models.length
+    ) {
+      const model = models[num - 1];
+
+      if (!seen.has(model.id)) {
+        seen.add(model.id);
+        selected.push(model);
+      }
+
+      continue;
+    }
+
+    const model = models.find(
+      (m) =>
+        m.id.toLowerCase() ===
+        part.toLowerCase(),
+    );
+
+    if (model && !seen.has(model.id)) {
+      seen.add(model.id);
+      selected.push(model);
+    }
+  }
+
+  return selected;
+}
+
+/* ============================================================================
+ * Pi paths
+ * ========================================================================== */
+
+function getPiAgentDirectory(): string {
   return path.join(
     os.homedir(),
     ".pi",
     "agent",
+  );
+}
+
+function getModelsJsonPath(): string {
+  return path.join(
+    getPiAgentDirectory(),
     "models.json",
   );
 }
+
+/* ============================================================================
+ * models.json
+ * ========================================================================== */
 
 async function readModelsJson(
   filePath: string,
@@ -823,9 +902,11 @@ async function readModelsJson(
     const parsed =
       JSON.parse(text);
 
-    return isObject(parsed)
-      ? (parsed as ModelsJson)
-      : {};
+    if (!isObject(parsed)) {
+      return {};
+    }
+
+    return parsed as ModelsJson;
   } catch (error) {
     const code =
       (error as NodeJS.ErrnoException)
@@ -839,11 +920,13 @@ async function readModelsJson(
   }
 }
 
-async function writeProvider(
-  filePath: string,
+async function writeProviderToModelsJson(
   providerId: string,
   provider: JsonObject,
-): Promise<void> {
+): Promise<string> {
+  const filePath =
+    getModelsJsonPath();
+
   const existing =
     await readModelsJson(
       filePath,
@@ -859,12 +942,6 @@ async function writeProvider(
         }
       : {};
 
-  /*
-   * IMPORTANT:
-   *
-   * Only this provider is replaced.
-   * Existing providers stay untouched.
-   */
   providers[providerId] =
     provider;
 
@@ -874,7 +951,7 @@ async function writeProvider(
   };
 
   await fs.mkdir(
-    path.dirname(filePath),
+    getPiAgentDirectory(),
     {
       recursive: true,
     },
@@ -891,11 +968,13 @@ async function writeProvider(
       encoding: "utf8",
     },
   );
+
+  return filePath;
 }
 
-/* -------------------------------------------------------------------------- */
-/* Provider construction                                                      */
-/* -------------------------------------------------------------------------- */
+/* ============================================================================
+ * Provider construction
+ * ========================================================================== */
 
 function buildProvider(
   providerId: string,
@@ -903,28 +982,22 @@ function buildProvider(
   apiKey: string,
   api: PiApi,
   models: DiscoveredModel[],
+  reasoningOverride:
+    | boolean
+    | undefined,
+  compatSettings?: JsonObject,
 ): JsonObject {
-  return {
-    name: providerId,
-
+  const provider: JsonObject = {
     baseUrl,
-
-    /*
-     * Literal API key.
-     *
-     * No Windows environment variable is
-     * created or modified.
-     */
-    apiKey,
-
     api,
-
     models: models.map(
       (model) => ({
         id: model.id,
+
         name: model.name,
 
         reasoning:
+          reasoningOverride ??
           model.reasoning,
 
         input:
@@ -941,11 +1014,22 @@ function buildProvider(
       }),
     ),
   };
+
+  // Only add apiKey if it exists (omit for external auth configurations)
+  if (apiKey) {
+    provider.apiKey = apiKey;
+  }
+
+  if (compatSettings) {
+    provider.compat = compatSettings;
+  }
+
+  return provider;
 }
 
-/* -------------------------------------------------------------------------- */
-/* Extension                                                                   */
-/* -------------------------------------------------------------------------- */
+/* ============================================================================
+ * Extension
+ * ========================================================================== */
 
 export default function (
   pi: ExtensionAPI,
@@ -954,7 +1038,7 @@ export default function (
     "setup-model-json",
     {
       description:
-        "Fetch provider models and generate/update ~/.pi/agent/models.json",
+        "Discover provider models and generate/update ~/.pi/agent/models.json",
 
       handler:
         async (_args, ctx) => {
@@ -963,9 +1047,9 @@ export default function (
           }
 
           try {
-            /* -------------------------------------------------------------- */
-            /* Ask for URL                                                     */
-            /* -------------------------------------------------------------- */
+            /* ----------------------------------------------------------------
+             * Provider URL
+             * -------------------------------------------------------------- */
 
             const urlInput =
               await ctx.ui.input(
@@ -990,18 +1074,31 @@ export default function (
                 urlInput,
               );
 
-            /* -------------------------------------------------------------- */
-            /* Ask for API key                                                 */
-            /* -------------------------------------------------------------- */
+            /* ----------------------------------------------------------------
+             * Infer API type early
+             * -------------------------------------------------------------- */
+            const api = inferApi(baseUrl);
 
-            const apiKey =
+            /* ----------------------------------------------------------------
+             * API key
+             * -------------------------------------------------------------- */
+            const isLocal =
+              baseUrl.includes("localhost") ||
+              baseUrl.includes("127.0.0.1") ||
+              baseUrl.includes("0.0.0.0");
+
+            const defaultApiKey = isLocal
+              ? "ollama"
+              : "Enter API key";
+
+            const apiKeyInput =
               await ctx.ui.input(
-                "API Key",
-                "Enter API key (leave empty if not required)",
+                "API Key (leave blank to omit)",
+                defaultApiKey,
               );
 
             if (
-              apiKey === undefined
+              apiKeyInput === undefined
             ) {
               ctx.ui.notify(
                 "Cancelled.",
@@ -1011,23 +1108,28 @@ export default function (
               return;
             }
 
-            /* -------------------------------------------------------------- */
-            /* Provider ID                                                      */
-            /* -------------------------------------------------------------- */
+            const apiKey =
+              apiKeyInput.trim() ||
+              (isLocal ? "ollama" : "");
 
-            const defaultId =
+            /* ----------------------------------------------------------------
+             * Provider ID
+             * -------------------------------------------------------------- */
+
+            const defaultProviderId =
               deriveProviderId(
                 baseUrl,
               );
 
-            const idInput =
+            const providerIdInput =
               await ctx.ui.input(
                 "Provider ID",
-                defaultId,
+                defaultProviderId,
               );
 
             if (
-              idInput === undefined
+              providerIdInput ===
+              undefined
             ) {
               ctx.ui.notify(
                 "Cancelled.",
@@ -1039,42 +1141,344 @@ export default function (
 
             const providerId =
               sanitizeProviderId(
-                idInput ||
-                  defaultId,
+                providerIdInput ||
+                  defaultProviderId,
               );
 
             if (!providerId) {
               throw new Error(
-                "Provider ID is empty or invalid.",
+                "Provider ID is invalid.",
               );
             }
 
-            /* -------------------------------------------------------------- */
-            /* Discover models                                                  */
-            /* -------------------------------------------------------------- */
+            /* ----------------------------------------------------------------
+             * Compat Settings
+             * -------------------------------------------------------------- */
 
-            ctx.ui.setWorkingMessage(
-              "Fetching model catalog...",
+            let compatSettings:
+              | JsonObject
+              | undefined;
+
+            if (api === "openai-completions") {
+              const defaultCompat = isLocal
+                ? "yes"
+                : "no";
+
+              const compatInput =
+                await ctx.ui.input(
+                  "Disable 'developer' role & 'reasoning_effort' for compatibility? (Common for Ollama, vLLM, local servers)",
+                  defaultCompat,
+                );
+
+              if (
+                compatInput !== undefined
+              ) {
+                const choice =
+                  compatInput
+                    .trim()
+                    .toLowerCase();
+
+                if (
+                  [
+                    "yes",
+                    "y",
+                    "true",
+                    "1",
+                  ].includes(choice)
+                ) {
+                  compatSettings = {
+                    supportsDeveloperRole: false,
+                    supportsReasoningEffort: false,
+                  };
+                }
+              }
+            }
+
+            /* ----------------------------------------------------------------
+             * Reasoning support question
+             * -------------------------------------------------------------- */
+
+            const reasoningInput =
+              await ctx.ui.input(
+                "Reasoning support?",
+                "yes / no / auto",
+              );
+
+            if (
+              reasoningInput ===
+              undefined
+            ) {
+              ctx.ui.notify(
+                "Cancelled.",
+                "warning",
+              );
+
+              return;
+            }
+
+            const reasoningChoice =
+              reasoningInput
+                .trim()
+                .toLowerCase();
+
+            let reasoningOverride:
+              | boolean
+              | undefined;
+
+            if (
+              [
+                "yes",
+                "y",
+                "true",
+                "1",
+              ].includes(
+                reasoningChoice,
+              )
+            ) {
+              reasoningOverride =
+                true;
+            } else if (
+              [
+                "no",
+                "n",
+                "false",
+                "0",
+              ].includes(
+                reasoningChoice,
+              )
+            ) {
+              reasoningOverride =
+                false;
+            } else if (
+              reasoningChoice === "" ||
+              reasoningChoice ===
+                "auto" ||
+              reasoningChoice ===
+                "automatic"
+            ) {
+              reasoningOverride =
+                undefined;
+            } else {
+              throw new Error(
+                'Reasoning must be "yes", "no", or "auto".',
+              );
+            }
+
+            /* ----------------------------------------------------------------
+             * Auto-discover or manual entry
+             * -------------------------------------------------------------- */
+
+            const autoFetchInput =
+              await ctx.ui.input(
+                "Auto-discover models from provider?",
+                "yes / no",
+              );
+
+            if (
+              autoFetchInput ===
+              undefined
+            ) {
+              ctx.ui.notify(
+                "Cancelled.",
+                "warning",
+              );
+
+              return;
+            }
+
+            const autoFetchChoice =
+              autoFetchInput
+                .trim()
+                .toLowerCase();
+
+            const wantsAutoFetch = ![
+              "no",
+              "n",
+              "false",
+              "0",
+            ].includes(
+              autoFetchChoice,
             );
 
-            const discovered =
-              await discoverModels(
-                baseUrl,
-                apiKey,
+            let models: DiscoveredModel[];
+            let discoveryEndpoint:
+              | string
+              | undefined;
+
+            if (wantsAutoFetch) {
+              ctx.ui.setWorkingMessage(
+                "Fetching provider model metadata...",
               );
 
-            /* -------------------------------------------------------------- */
-            /* Infer provider API                                               */
-            /* -------------------------------------------------------------- */
+              const discovered =
+                await discoverModels(
+                  baseUrl,
+                  apiKey,
+                );
 
-            const api =
-              inferApi(
-                baseUrl,
+              discoveryEndpoint =
+                discovered.endpoint;
+
+              const listText =
+                discovered.models
+                  .map(
+                    (
+                      model,
+                      index,
+                    ) =>
+                      `  ${index + 1}. ${model.id} (${model.name})`,
+                  )
+                  .join("\n");
+
+              ctx.ui.notify(
+                [
+                  `Discovered ${discovered.models.length} models:`,
+                  "",
+                  listText,
+                  "",
+                  "Enter numbers (1,3,5), ranges (1-5), model IDs, or 'all'.",
+                ].join("\n"),
+                "info",
               );
 
-            /* -------------------------------------------------------------- */
-            /* Build Pi configuration                                           */
-            /* -------------------------------------------------------------- */
+              const selectionInput =
+                await ctx.ui.input(
+                  "Select models to add (or 'all')",
+                  "all",
+                );
+
+              if (
+                selectionInput ===
+                undefined
+              ) {
+                ctx.ui.notify(
+                  "Cancelled.",
+                  "warning",
+                );
+
+                return;
+              }
+
+              const selection =
+                selectionInput.trim();
+
+              if (
+                selection === "" ||
+                selection.toLowerCase() ===
+                  "all"
+              ) {
+                models =
+                  discovered.models;
+              } else {
+                models =
+                  parseModelSelection(
+                    selection,
+                    discovered.models,
+                  );
+
+                if (
+                  models.length === 0
+                ) {
+                  throw new Error(
+                    [
+                      "No valid models selected.",
+                      "",
+                      "Use numbers (1,3,5), ranges (1-5), model IDs, or 'all'.",
+                    ].join("\n"),
+                  );
+                }
+
+                ctx.ui.notify(
+                  `Selected ${models.length} of ${discovered.models.length} models.`,
+                  "info",
+                );
+              }
+            } else {
+              const manualInput =
+                await ctx.ui.input(
+                  "Enter model IDs (comma-separated)",
+                  "model-id-1, model-id-2",
+                );
+
+              if (
+                manualInput ===
+                undefined
+              ) {
+                ctx.ui.notify(
+                  "Cancelled.",
+                  "warning",
+                );
+
+                return;
+              }
+
+              const ids = manualInput
+                .split(",")
+                .map((s) =>
+                  s.trim(),
+                )
+                .filter(Boolean);
+
+              if (
+                ids.length === 0
+              ) {
+                throw new Error(
+                  "At least one model ID is required.",
+                );
+              }
+
+              const imageInput =
+                await ctx.ui.input(
+                  "Do these models support image/vision input?",
+                  "yes / no",
+                );
+
+              if (
+                imageInput ===
+                undefined
+              ) {
+                ctx.ui.notify(
+                  "Cancelled.",
+                  "warning",
+                );
+
+                return;
+              }
+
+              const imageChoice =
+                imageInput
+                  .trim()
+                  .toLowerCase();
+
+              const supportsImage = [
+                "yes",
+                "y",
+                "true",
+                "1",
+              ].includes(
+                imageChoice,
+              );
+
+              models = ids.map(
+                (id) =>
+                  createManualModel(
+                    id,
+                    supportsImage,
+                  ),
+              );
+
+              discoveryEndpoint =
+                undefined;
+
+              ctx.ui.notify(
+                `Created ${models.length} manual model entr${models.length === 1 ? "y" : "ies"}.`,
+                "info",
+              );
+            }
+
+            /* ----------------------------------------------------------------
+             * Build provider
+             * -------------------------------------------------------------- */
 
             const provider =
               buildProvider(
@@ -1082,33 +1486,25 @@ export default function (
                 baseUrl,
                 apiKey,
                 api,
-                discovered.models,
+                models,
+                reasoningOverride,
+                compatSettings,
               );
 
-            /* -------------------------------------------------------------- */
-            /* Write models.json                                                */
-            /* -------------------------------------------------------------- */
+            /* ----------------------------------------------------------------
+             * Write ~/.pi/agent/models.json
+             * -------------------------------------------------------------- */
 
             const modelsPath =
-              getModelsJsonPath();
+              await writeProviderToModelsJson(
+                providerId,
+                provider,
+              );
 
-            await writeProvider(
-              modelsPath,
-              providerId,
-              provider,
-            );
+            /* ----------------------------------------------------------------
+             * Register immediately
+             * -------------------------------------------------------------- */
 
-            /* -------------------------------------------------------------- */
-            /* Register immediately                                             */
-            /* -------------------------------------------------------------- */
-
-            /*
-             * Pi applies registerProvider calls made
-             * after extension load immediately.
-             *
-             * models.json is still written so the
-             * configuration survives Pi restarts.
-             */
             pi.registerProvider(
               providerId,
               provider as any,
@@ -1118,52 +1514,77 @@ export default function (
               "",
             );
 
-            /* -------------------------------------------------------------- */
-            /* Result                                                           */
-            /* -------------------------------------------------------------- */
+            /* ----------------------------------------------------------------
+             * Result display
+             * -------------------------------------------------------------- */
+
+            const reasoningMode =
+              reasoningOverride ===
+              true
+                ? "forced ON"
+                : reasoningOverride ===
+                    false
+                  ? "forced OFF"
+                  : "automatic";
+
+            const compatLabel =
+              compatSettings
+                ? "Compat: developer role & reasoning_effort disabled"
+                : "Compat: default";
+
+            const sourceLabel =
+              discoveryEndpoint
+                ? `Discovery endpoint: ${discoveryEndpoint}`
+                : "Source: manual entry";
 
             const preview =
-              discovered.models
+              models
                 .slice(0, 12)
                 .map(
                   (model) =>
                     [
                       `  ${model.id}`,
-                      `    context: ${model.contextWindow.toLocaleString()}`,
-                      `    max output: ${model.maxTokens.toLocaleString()}`,
+                      `    contextWindow: ${model.contextWindow.toLocaleString()}`,
+                      `    maxTokens: ${model.maxTokens.toLocaleString()}`,
+                      `    reasoning: ${
+                        reasoningOverride ??
+                        model.reasoning
+                      }`,
                     ].join("\n"),
                 )
                 .join("\n");
 
-            const hiddenCount =
+            const remaining =
               Math.max(
                 0,
-                discovered.models.length -
+                models.length -
                   12,
               );
 
             ctx.ui.notify(
               [
-                "Model setup complete.",
+                "Pi model setup complete.",
                 "",
                 `Provider: ${providerId}`,
                 `API: ${api}`,
-                `Models found: ${discovered.models.length}`,
-                `Endpoint: ${discovered.endpoint}`,
+                `Models: ${models.length}`,
+                sourceLabel,
+                `Reasoning setting: ${reasoningMode}`,
+                compatLabel,
                 "",
-                "Discovered models:",
+                "Models:",
                 preview,
 
-                hiddenCount > 0
-                  ? `\n  ... and ${hiddenCount} more`
+                remaining > 0
+                  ? `  ... and ${remaining} more`
                   : "",
 
                 "",
-                `Saved to:`,
+                "Saved to:",
                 modelsPath,
 
                 "",
-                "Windows environment variables were not modified.",
+                "No environment variables were created or modified.",
               ]
                 .filter(Boolean)
                 .join("\n"),
@@ -1176,13 +1597,13 @@ export default function (
 
             ctx.ui.notify(
               [
-                "Model setup failed.",
+                "Pi model setup failed.",
                 "",
                 error instanceof Error
                   ? error.message
                   : String(error),
                 "",
-                "No environment variables were modified.",
+                "No environment variables were created or modified.",
               ].join("\n"),
               "error",
             );

@@ -38,6 +38,13 @@ type ModelsJson = {
 const DEFAULT_CONTEXT_WINDOW = 128_000;
 const DEFAULT_MAX_TOKENS = 16_384;
 
+const API_TYPES: PiApi[] = [
+  "openai-completions",
+  "openai-responses",
+  "anthropic-messages",
+  "google-generative-ai",
+];
+
 /* ============================================================================
  * Generic helpers
  * ========================================================================== */
@@ -765,6 +772,8 @@ async function discoverModels(
 function createManualModel(
   id: string,
   supportsImage: boolean,
+  contextWindow: number,
+  maxTokens: number,
 ): DiscoveredModel {
   return {
     id,
@@ -773,8 +782,8 @@ function createManualModel(
     input: supportsImage
       ? ["text", "image"]
       : ["text"],
-    contextWindow: DEFAULT_CONTEXT_WINDOW,
-    maxTokens: DEFAULT_MAX_TOKENS,
+    contextWindow,
+    maxTokens,
     cost: {
       input: 0,
       output: 0,
@@ -1015,12 +1024,11 @@ function buildProvider(
     ),
   };
 
-  // Only add apiKey if it exists (omit for external auth configurations)
   if (apiKey) {
     provider.apiKey = apiKey;
   }
 
-  if (compatSettings) {
+  if (compatSettings && Object.keys(compatSettings).length > 0) {
     provider.compat = compatSettings;
   }
 
@@ -1075,13 +1083,72 @@ export default function (
               );
 
             /* ----------------------------------------------------------------
-             * Infer API type early
+             * API Type Selection
              * -------------------------------------------------------------- */
-            const api = inferApi(baseUrl);
+
+            const detectedApi = inferApi(baseUrl);
+
+            const apiOptionsText = API_TYPES
+              .map((t, i) => `${i + 1}. ${t}`)
+              .join("\n");
+
+            ctx.ui.notify(
+              [
+                "Select API type:",
+                "",
+                apiOptionsText,
+                "",
+                `Detected: ${detectedApi}`,
+                "",
+                `Enter number (1-${API_TYPES.length}) or press Enter for detected type.`,
+              ].join("\n"),
+              "info",
+            );
+
+            const apiInput =
+              await ctx.ui.input(
+                "API Type",
+                detectedApi,
+              );
+
+            if (apiInput === undefined) {
+              ctx.ui.notify(
+                "Cancelled.",
+                "warning",
+              );
+              return;
+            }
+
+            let api: PiApi = detectedApi;
+
+            const trimmedApiInput = apiInput.trim();
+
+            if (trimmedApiInput) {
+              const num = Number(trimmedApiInput);
+
+              if (
+                Number.isFinite(num) &&
+                num >= 1 &&
+                num <= API_TYPES.length
+              ) {
+                api = API_TYPES[num - 1];
+              } else if (
+                API_TYPES.includes(
+                  trimmedApiInput as PiApi,
+                )
+              ) {
+                api = trimmedApiInput as PiApi;
+              } else {
+                throw new Error(
+                  `Invalid API type: "${trimmedApiInput}". Must be one of: ${API_TYPES.join(", ")}`,
+                );
+              }
+            }
 
             /* ----------------------------------------------------------------
              * API key
              * -------------------------------------------------------------- */
+
             const isLocal =
               baseUrl.includes("localhost") ||
               baseUrl.includes("127.0.0.1") ||
@@ -1104,7 +1171,6 @@ export default function (
                 "Cancelled.",
                 "warning",
               );
-
               return;
             }
 
@@ -1135,7 +1201,6 @@ export default function (
                 "Cancelled.",
                 "warning",
               );
-
               return;
             }
 
@@ -1155,44 +1220,44 @@ export default function (
              * Compat Settings
              * -------------------------------------------------------------- */
 
-            let compatSettings:
-              | JsonObject
-              | undefined;
+            let compatSettings: JsonObject = {};
 
-            if (api === "openai-completions") {
-              const defaultCompat = isLocal
-                ? "yes"
-                : "no";
+            if (api === "openai-completions" || api === "openai-responses") {
+              const defaultCompat = isLocal ? "yes" : "no";
 
-              const compatInput =
-                await ctx.ui.input(
-                  "Disable 'developer' role & 'reasoning_effort' for compatibility? (Common for Ollama, vLLM, local servers)",
-                  defaultCompat,
-                );
+              const compatInput = await ctx.ui.input(
+                "Disable 'developer' role & 'reasoning_effort' for compatibility? (Common for Ollama, vLLM, local servers)",
+                defaultCompat,
+              );
 
-              if (
-                compatInput !== undefined
-              ) {
-                const choice =
-                  compatInput
-                    .trim()
-                    .toLowerCase();
-
-                if (
-                  [
-                    "yes",
-                    "y",
-                    "true",
-                    "1",
-                  ].includes(choice)
-                ) {
-                  compatSettings = {
-                    supportsDeveloperRole: false,
-                    supportsReasoningEffort: false,
-                  };
+              if (compatInput !== undefined) {
+                const choice = compatInput.trim().toLowerCase();
+                if (["yes", "y", "true", "1"].includes(choice)) {
+                  compatSettings.supportsDeveloperRole = false;
+                  compatSettings.supportsReasoningEffort = false;
                 }
               }
             }
+
+            const advancedCompatInput = await ctx.ui.input(
+              "Enter advanced 'compat' settings as JSON (leave blank to skip, e.g. {\"maxTokensField\":\"max_tokens\"})",
+              ""
+            );
+
+            if (advancedCompatInput && advancedCompatInput.trim()) {
+              try {
+                const parsed = JSON.parse(advancedCompatInput.trim());
+                if (isObject(parsed)) {
+                  compatSettings = { ...compatSettings, ...parsed };
+                } else {
+                  ctx.ui.notify("Advanced compat settings must be a JSON object. Ignoring.", "warning");
+                }
+              } catch (e) {
+                ctx.ui.notify(`Failed to parse advanced compat JSON: ${e instanceof Error ? e.message : String(e)}. Ignoring.`, "warning");
+              }
+            }
+
+            const finalCompat = Object.keys(compatSettings).length > 0 ? compatSettings : undefined;
 
             /* ----------------------------------------------------------------
              * Reasoning support question
@@ -1212,7 +1277,6 @@ export default function (
                 "Cancelled.",
                 "warning",
               );
-
               return;
             }
 
@@ -1282,7 +1346,6 @@ export default function (
                 "Cancelled.",
                 "warning",
               );
-
               return;
             }
 
@@ -1355,7 +1418,6 @@ export default function (
                   "Cancelled.",
                   "warning",
                 );
-
                 return;
               }
 
@@ -1394,6 +1456,10 @@ export default function (
                 );
               }
             } else {
+              /* ------------------------------------------------------------
+               * Manual model entry.
+               * ---------------------------------------------------------- */
+
               const manualInput =
                 await ctx.ui.input(
                   "Enter model IDs (comma-separated)",
@@ -1408,7 +1474,6 @@ export default function (
                   "Cancelled.",
                   "warning",
                 );
-
                 return;
               }
 
@@ -1427,6 +1492,10 @@ export default function (
                 );
               }
 
+              /* ------------------------------------------------------------
+               * Ask about image / vision support.
+               * ---------------------------------------------------------- */
+
               const imageInput =
                 await ctx.ui.input(
                   "Do these models support image/vision input?",
@@ -1441,7 +1510,6 @@ export default function (
                   "Cancelled.",
                   "warning",
                 );
-
                 return;
               }
 
@@ -1459,11 +1527,41 @@ export default function (
                 imageChoice,
               );
 
+              /* ------------------------------------------------------------
+               * Ask about context window and max output tokens.
+               * ---------------------------------------------------------- */
+
+              const ctxWindowInput =
+                await ctx.ui.input(
+                  "Context Window Size (tokens)",
+                  String(DEFAULT_CONTEXT_WINDOW),
+                );
+
+              if (ctxWindowInput === undefined) {
+                ctx.ui.notify("Cancelled.", "warning");
+                return;
+              }
+              const contextWindow = firstNumber(ctxWindowInput) ?? DEFAULT_CONTEXT_WINDOW;
+
+              const maxTokensInput =
+                await ctx.ui.input(
+                  "Max Output Tokens",
+                  String(DEFAULT_MAX_TOKENS),
+                );
+
+              if (maxTokensInput === undefined) {
+                ctx.ui.notify("Cancelled.", "warning");
+                return;
+              }
+              const maxTokens = firstNumber(maxTokensInput) ?? DEFAULT_MAX_TOKENS;
+
               models = ids.map(
                 (id) =>
                   createManualModel(
                     id,
                     supportsImage,
+                    contextWindow,
+                    maxTokens,
                   ),
               );
 
@@ -1488,7 +1586,7 @@ export default function (
                 api,
                 models,
                 reasoningOverride,
-                compatSettings,
+                finalCompat,
               );
 
             /* ----------------------------------------------------------------
@@ -1528,8 +1626,8 @@ export default function (
                   : "automatic";
 
             const compatLabel =
-              compatSettings
-                ? "Compat: developer role & reasoning_effort disabled"
+              finalCompat
+                ? `Compat: ${Object.keys(finalCompat).join(", ")}`
                 : "Compat: default";
 
             const sourceLabel =
